@@ -1,50 +1,57 @@
 import os
-import sys
-from threading import Thread
-from flask import Flask, render_template, session, redirect, url_for
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+from flask import Flask, render_template, session, redirect, url_for, flash
 from flask_bootstrap import Bootstrap
-from flask_moment import Moment
 from flask_wtf import FlaskForm
-from wtforms import StringField, SubmitField
+from wtforms import StringField, SubmitField, BooleanField
 from wtforms.validators import DataRequired
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
-from flask_mail import Mail, Message
-
-import requests
-from datetime import datetime
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'hard to guess string'
+
+# --- Configurações ---
+app.config['SECRET_KEY'] = 'uma string bem dificil de adivinhar'
+
+# Banco de Dados
 app.config['SQLALCHEMY_DATABASE_URI'] =\
     'sqlite:///' + os.path.join(basedir, 'data.sqlite')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-app.config['API_KEY'] = os.environ.get('API_KEY')
-app.config['API_URL'] = os.environ.get('API_URL')
+# Variáveis de Ambiente para o SendGrid e Aluno
+app.config['SENDGRID_API_KEY'] = os.environ.get('SENDGRID_API_KEY')
 app.config['API_FROM'] = os.environ.get('API_FROM')
-
-app.config['FLASKY_MAIL_SUBJECT_PREFIX'] = '[Flasky]'
 app.config['FLASKY_ADMIN'] = os.environ.get('FLASKY_ADMIN')
+app.config['STUDENT_ID'] = os.environ.get('STUDENT_ID')
+app.config['STUDENT_NAME'] = os.environ.get('STUDENT_NAME')
 
+# Inicialização das Extensões
 bootstrap = Bootstrap(app)
-moment = Moment(app)
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
-mail = Mail(app)
 
-
+# --- Modelos do Banco de Dados ---
 class Role(db.Model):
     __tablename__ = 'roles'
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(64), unique=True)
     users = db.relationship('User', backref='role', lazy='dynamic')
 
+    @staticmethod
+    def insert_roles():
+        roles = ['User', 'Administrator']
+        for r in roles:
+            role = Role.query.filter_by(name=r).first()
+            if role is None:
+                role = Role(name=r)
+                db.session.add(role)
+        db.session.commit()
+
     def __repr__(self):
         return '<Role %r>' % self.name
-
 
 class User(db.Model):
     __tablename__ = 'users'
@@ -55,44 +62,46 @@ class User(db.Model):
     def __repr__(self):
         return '<User %r>' % self.username
 
-def send_simple_message(to, subject, newUser):
-    print('Enviando mensagem (POST)...', flush=True)
-    print('URL: ' + str(app.config['API_URL']), flush=True)
-    print('api: ' + str(app.config['API_KEY']), flush=True)
-    print('from: ' + str(app.config['API_FROM']), flush=True)
-    print('to: ' + str(to), flush=True)
-    print('subject: ' + str(app.config['FLASKY_MAIL_SUBJECT_PREFIX']) + ' ' + subject, flush=True)
-    print('text: ' + "Novo usuário cadastrado: " + newUser, flush=True)
-
-    resposta = requests.post(app.config['API_URL'], 
-                             auth=("api", app.config['API_KEY']), data={"from": app.config['API_FROM'], 
-                                                                        "to": to, 
-                                                                        "subject": app.config['FLASKY_MAIL_SUBJECT_PREFIX'] + ' ' + subject, 
-                                                                        "text": "Novo usuário cadastrado: " + newUser})
-        
-    print('Enviando mensagem (Resposta)...' + str(resposta) + ' - ' + datetime.now().strftime("%m/%d/%Y, %H:%M:%S"), flush=True)
-    return resposta
-
-
+# --- Formulário ---
 class NameForm(FlaskForm):
-    name = StringField('What is your name?', validators=[DataRequired()])
+    name = StringField('Qual é o seu nome?', validators=[DataRequired()])
+    send_email = BooleanField('Deseja enviar e-mail para flaskaulasweb@zohomail.com?')
     submit = SubmitField('Submit')
 
+# --- Função de Envio de E-mail (com SendGrid) ---
+def send_email_sendgrid(to, subject, new_user):
+    """Envia um e-mail usando a API do SendGrid."""
+    message = Mail(
+        from_email=app.config['API_FROM'],
+        to_emails=to,
+        subject=subject,
+        html_content=f"""
+            <h3>Novo Usuário Cadastrado!</h3>
+            <p><strong>Prontuário do Aluno:</strong> {app.config['STUDENT_ID']}</p>
+            <p><strong>Nome do Aluno:</strong> {app.config['STUDENT_NAME']}</p>
+            <hr>
+            <p><strong>Nome do novo usuário:</strong> {new_user}</p>
+        """
+    )
+    try:
+        sg = SendGridAPIClient(app.config['SENDGRID_API_KEY'])
+        response = sg.send(message)
+        print(f"E-mail enviado para {to}, status: {response.status_code}")
+    except Exception as e:
+        print(f"Erro ao enviar e-mail para {to}: {e}")
 
+# --- Rotas da Aplicação ---
 @app.shell_context_processor
 def make_shell_context():
     return dict(db=db, User=User, Role=Role)
-
 
 @app.errorhandler(404)
 def page_not_found(e):
     return render_template('404.html'), 404
 
-
 @app.errorhandler(500)
 def internal_server_error(e):
     return render_template('500.html'), 500
-
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -100,27 +109,44 @@ def index():
     if form.validate_on_submit():
         user = User.query.filter_by(username=form.name.data).first()
         if user is None:
-            user = User(username=form.name.data)
-            db.session.add(user)
+            # Define o papel do usuário (Administrator ou User)
+            admin_role = Role.query.filter_by(name='Administrator').first()
+            user_role = Role.query.filter_by(name='User').first()
+            # O primeiro usuário cadastrado (ou 'john') será o admin
+            if User.query.count() == 0 or form.name.data.lower() == 'john':
+                 new_user = User(username=form.name.data, role=admin_role)
+            else:
+                 new_user = User(username=form.name.data, role=user_role)
+            
+            db.session.add(new_user)
             db.session.commit()
             session['known'] = False
+            flash('E-mail(s) enviado(s) com sucesso!')
 
-            print('Verificando variáveis de ambiente: Server log do PythonAnyWhere', flush=True)
-            print('FLASKY_ADMIN: ' + str(app.config['FLASKY_ADMIN']), flush=True)
-            print('URL: ' + str(app.config['API_URL']), flush=True)
-            print('api: ' + str(app.config['API_KEY']), flush=True)
-            print('from: ' + str(app.config['API_FROM']), flush=True)
-            print('to: ' + str([app.config['FLASKY_ADMIN'], "flaskaulasweb@zohomail.com"]), flush=True)
-            print('subject: ' + str(app.config['FLASKY_MAIL_SUBJECT_PREFIX']), flush=True)
-            print('text: ' + "Novo usuário cadastrado: " + form.name.data, flush=True)
-
-            if app.config['FLASKY_ADMIN']:                
-                print('Enviando mensagem...', flush=True)
-                send_simple_message([app.config['FLASKY_ADMIN'], "flaskaulasweb@zohomail.com"], 'Novo usuário', form.name.data)
-                print('Mensagem enviada...', flush=True)
+            # Envia e-mail para o administrador (seu e-mail institucional)
+            if app.config['FLASKY_ADMIN']:
+                send_email_sendgrid(
+                    to=app.config['FLASKY_ADMIN'],
+                    subject='[Receba Jr] Novo Usuário',
+                    new_user=form.name.data
+                )
+            
+            # Se a caixa de seleção foi marcada, envia para o e-mail adicional
+            if form.send_email.data:
+                send_email_sendgrid(
+                    to='flaskaulasweb@zohomail.com',
+                    subject='[Receba Jr] Novo Usuário',
+                    new_user=form.name.data
+                )
         else:
             session['known'] = True
+        
         session['name'] = form.name.data
+        form.name.data = ''
         return redirect(url_for('index'))
+
+    # Busca todos os usuários para exibir na tabela
+    users = User.query.order_by(User.id.asc()).all()
+    
     return render_template('index.html', form=form, name=session.get('name'),
-                           known=session.get('known', False))
+                           known=session.get('known', False), users=users)
