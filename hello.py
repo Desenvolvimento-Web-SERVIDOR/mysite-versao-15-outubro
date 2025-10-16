@@ -123,7 +123,7 @@ def index():
             session['known'] = False
             flash('E-mail(s) enviado(s) com sucesso!')
 
-            # Envia e-mail para o administrador (seu e-mail institucional)
+            # Envia e-mail para o administrador 
             if app.config['FLASKY_ADMIN']:
                 send_email_sendgrid(
                     to=app.config['FLASKY_ADMIN'],
