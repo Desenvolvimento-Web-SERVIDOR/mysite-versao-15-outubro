@@ -1,8 +1,25 @@
-# Ignore compiled Python files
+# Arquivos de Banco de Dados
+# Nunca adicione o banco de dados ao repositório.
+data.sqlite
+
+# Arquivos de Ambiente
+# Contém senhas e chaves de API, NUNCA deve ir para o repositório.
+.env
+
+# Pasta de instância do Flask
+# Pode conter configurações e o banco de dados.
+instance/
+
+# Ignore compilados do Python
 *.pyc
 
-# Ignore Python cache directories
+# Ignore caches do Python
 __pycache__/
 
-# Ignore virtual environment directories
+# Ignore pastas de ambiente virtual
 venv/
+.venv/
+
+# Arquivos de sistema operacional
+.DS_Store
+Thumbs.db
